@@ -499,7 +499,16 @@ def solve():
             }), 400
 
         # ÇÖZ
-        results = solver.solve(model, tee=False) if hasattr(solver, "solve") else solver.solve(model)
+        # ÇÖZ  (APPsi-HiGHS 'tee' parametresini kabul etmez)
+if solver_name == "appsi_highs":
+    results = solver.solve(model)
+else:
+    # Klasik arayüzler için 'tee' deneyip, desteklenmiyorsa onsuz çöz
+    try:
+        results = solver.solve(model, tee=False)
+    except TypeError:
+        results = solver.solve(model)
+
 
         # TerminationCondition hem APPsi hem klasik arayüz için güvenli şekilde alınır
         from pyomo.opt import TerminationCondition
@@ -522,6 +531,7 @@ def solve():
 if __name__ == "__main__":
     # python backend.py
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
 
