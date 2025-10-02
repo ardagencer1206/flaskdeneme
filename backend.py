@@ -490,30 +490,28 @@ def solve():
 
         # Çöz
         if is_appsi:
-            # APPsi-HiGHS 'tee' parametresi almaz
+            # APPsi-HiGHS 'tee' parametresini almaz
             results = solver.solve(model)
             term = getattr(results, "termination_condition", None)
         else:
-            # Klasik arayüzler: 'tee' destekleniyorsa ver, değilse onsuz çöz
+            # Klasik arayüz: 'tee' destekliyse ver, değilse onsuz çöz
             try:
                 results = solver.solve(model, tee=False)
             except TypeError:
                 results = solver.solve(model)
-            # TerminationCondition güvenli okuma
+
+            # TerminationCondition'ı güvenli oku
             if hasattr(results, "solver") and hasattr(results.solver, "termination_condition"):
                 term = results.solver.termination_condition
             else:
                 term = getattr(results, "termination_condition", None)
 
-        if term in [TerminationCondition.feasible, TerminationCondition.optimal]:
-    out = extract_results(model, meta)
-    return jsonify({"ok": True, "solver": solver_name, "result": out})
+        # ---- BURADAN SONRASI DOĞRU BLOK ----
+        if term in (TerminationCondition.feasible, TerminationCondition.optimal):
+            out = extract_results(model, meta)
+            return jsonify({"ok": True, "solver": solver_name, "result": out})
         else:
-        return jsonify({"ok": False, "error": f"Çözüm bulunamadı. Durum: {term}"}), 200
-
-
-        out = extract_results(model, meta)
-        return jsonify({"ok": True, "solver": solver_name, "result": out})
+            return jsonify({"ok": False, "error": f"Çözüm bulunamadı. Durum: {term}"}), 200
 
     except Exception as e:
         return jsonify({"ok": False, "error": f"Hata: {str(e)}", "trace": traceback.format_exc()}), 500
@@ -522,5 +520,6 @@ def solve():
 if __name__ == "__main__":
     # Lokal test için:
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
