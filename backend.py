@@ -507,11 +507,13 @@ def solve():
                 term = getattr(results, "termination_condition", None)
 
         # ---- BURADAN SONRASI DOĞRU BLOK ----
-        if term in (TerminationCondition.feasible, TerminationCondition.optimal):
-            out = extract_results(model, meta)
-            return jsonify({"ok": True, "solver": solver_name, "result": out})
-        else:
-            return jsonify({"ok": False, "error": f"Çözüm bulunamadı. Durum: {term}"}), 200
+# Çözüm sonrası kontrol
+            if term in (TerminationCondition.feasible, TerminationCondition.optimal):
+                out = extract_results(model, meta)
+                return jsonify({"ok": True, "solver": solver_name, "result": out})
+            else:
+                return jsonify({"ok": False, "error": f"Çözüm bulunamadı. Durum: {term}"}), 200
+
 
     except Exception as e:
         return jsonify({"ok": False, "error": f"Hata: {str(e)}", "trace": traceback.format_exc()}), 500
@@ -520,6 +522,7 @@ def solve():
 if __name__ == "__main__":
     # Lokal test için:
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
 
