@@ -491,30 +491,42 @@ def solve():
         if solver is None:
             return jsonify({"ok": False, "error": "Uygun MILP çözücüsü bulunamadı."}), 400
 
-        # ÇÖZ
+        # --- ÇÖZ ---
+        # Appsi-HiGHS 'tee' kabul etmez; klasik arayüzde varsa kapatılmış tee ile deneriz.
         if is_appsi:
-            # APPsi-HiGHS 'tee' argümanını kabul etmez
             results = solver.solve(model)
             term = getattr(results, "termination_condition", None)
         else:
-            # Klasik arayüz: 'tee' destekliyse kullan, değilse onsuz çöz
             try:
                 results = solver.solve(model, tee=False)
             except TypeError:
                 results = solver.solve(model)
-
-            # TerminationCondition'ı güvenli oku
+            # TerminationCondition güvenli okuma (bazı arayüzler results.solver.* verir)
+            term = None
             if hasattr(results, "solver") and hasattr(results.solver, "termination_condition"):
                 term = results.solver.termination_condition
             else:
                 term = getattr(results, "termination_condition", None)
 
-        # Başarı kontrolü — OPTIMAL ve FEASIBLE durumları BAŞARILI kabul edilir
-        if term in (TerminationCondition.feasible, TerminationCondition.optimal):
+        # --- Başarı kontrolü ---
+        # Pyomo TerminationCondition enumu ile karşılaştır; metin fallback'i de ekle.
+        success_terms = {
+            getattr(TerminationCondition, "optimal", None),
+            getattr(TerminationCondition, "feasible", None),
+            getattr(TerminationCondition, "locallyOptimal", None),
+        }
+        term_str = (str(term) or "").lower()  # örn: "terminationcondition.optimal"
+
+        is_success = (term in success_terms) \
+                     or term_str.endswith("optimal") \
+                     or term_str.endswith("feasible")
+
+        if is_success:
             out = extract_results(model, meta)
             return jsonify({"ok": True, "solver": solver_name, "result": out})
-        else:
-            return jsonify({"ok": False, "error": f"Çözüm bulunamadı. Durum: {term}"}), 200
+
+        # başarısız durum
+        return jsonify({"ok": False, "error": f"Çözüm bulunamadı. Durum: {term}"}), 200
 
     except Exception as e:
         return jsonify({"ok": False, "error": f"Hata: {str(e)}", "trace": traceback.format_exc()}), 500
@@ -523,6 +535,7 @@ def solve():
 if __name__ == "__main__":
     # Lokal test için:
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
 
