@@ -1,18 +1,17 @@
 # -*- coding: utf-8 -*-
-import json
 import traceback
 from typing import Dict, Any, List, Tuple
 
 from flask import Flask, request, jsonify, send_from_directory
 from pyomo.environ import (
     ConcreteModel, Set, Param, Var, Binary, NonNegativeReals, Objective, minimize,
-    Constraint, Any as PyAny, value, TerminationCondition, SolverFactory
+    Constraint, Any as PyAny, value
 )
+from pyomo.opt import TerminationCondition
 
 app = Flask(__name__, static_url_path="", static_folder=".")
 
 # ---------- Yardımcılar ----------
-
 def safe_float(x, default=0.0):
     try:
         return float(x)
@@ -21,58 +20,46 @@ def safe_float(x, default=0.0):
 
 def pick_solver():
     """
-    Önce Pyomo APPsi'nin HiGHS wrapper'ını doğrudan dener (highspy ile çalışır).
-    Başarısız olursa klasik SolverFactory sırasına düşer.
-    Geriye (solver_adı, solver_nesnesi) döner.
+    Önce Pyomo APPsi'nin HiGHS (highspy) wrapper'ını dener.
+    Olmazsa SolverFactory ile bilinen adları dener.
+    Geriye (ad, solver, is_appsi) döner.
     """
-    # 1) APPsi-HiGHS (doğrudan Python API)
+    # 1) APPsi-HiGHS (doğrudan Python API - highspy ile)
     try:
         from pyomo.contrib.appsi.solvers.highs import Highs as AppsiHighs
         s = AppsiHighs()
         try:
-            s.config.time_limit = 300  # makul süre sınırı
+            s.config.time_limit = 300
         except Exception:
             pass
-        return "appsi_highs", s
+        return "appsi_highs", s, True
     except Exception:
         pass
 
-    # 2) SolverFactory ile dene (Railway'de bazen 'highs' da çalışır)
-    from pyomo.environ import SolverFactory
-    for cand in ["appsi_highs", "highs", "cplex", "cbc", "glpk"]:
-        try:
-            s = SolverFactory(cand)
-            if s is not None and s.available():
-                # zaman sınırı ayarla (opsiyonel)
-                for key in ("time_limit", "timelimit"):
-                    try:
-                        s.options[key] = 300
-                    except Exception:
-                        pass
-                if cand == "cplex":
-                    s.options["mipgap"] = 0.05
-                    s.options["threads"] = 2
-                return cand, s
-        except Exception:
-            continue
+    # 2) Klasik SolverFactory (bazı ortamlarda 'highs' da bulunabiliyor)
+    try:
+        from pyomo.environ import SolverFactory
+        for cand in ["highs", "cplex", "cbc", "glpk"]:
+            try:
+                s = SolverFactory(cand)
+                if s is not None and s.available():
+                    # makul zaman sınırı ayarla (destekliyorsa)
+                    for key in ("time_limit", "timelimit"):
+                        try: s.options[key] = 300
+                        except Exception: pass
+                    if cand == "cplex":
+                        s.options["mipgap"] = 0.05
+                        s.options["threads"] = 2
+                    return cand, s, False
+            except Exception:
+                continue
+    except Exception:
+        pass
 
-    return None, None
-
+    return None, None, False
 
 
 def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]:
-    """
-    Kullanıcıdan gelen JSON girdilerinden Pyomo modelini kurar.
-    Gerekli anahtarlar:
-      cities: ["İstanbul","Ankara","İzmir"]
-      main_depot: "İstanbul"
-      periods: 6   # t=1..periods
-      vehicle_types: { "Küçük": {"kapasite":200,"maliyet_km":2.5,"sabit_maliyet":150,"min_doluluk":0.4}, ...}
-      vehicle_count: { "Küçük":2, "Orta":1 }
-      distances: [ ["İstanbul","Ankara",450], ["İstanbul","İzmir",330], ["Ankara","İzmir",590] ]
-      packages: [ {"id":"P1","baslangic":"Ankara","hedef":"İzmir","agirlik":80,"ready":1,"deadline_suresi":5,"ceza":100}, ...]
-      minutil_penalty: 10.0
-    """
     # --- Girdiler
     cities: List[str] = payload["cities"]
     main_depot: str = payload["main_depot"]
@@ -161,70 +148,58 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
     model.obj = Objective(rule=objective_rule, sense=minimize)
 
     # Kısıtlar
-
-    # 1) Paket origin'den tam 1 çıkış (ready'den sonra)
     def package_origin_rule(m, p):
         o, r = m.PackageOrigin[p], m.PackageReady[p]
         return sum(m.y[p, v, o, j, t] for v in m.Vehicles for j in m.Cities for t in m.Periods if j != o and t >= r) == 1
-
     model.package_origin_constraint = Constraint(model.Packages, rule=package_origin_rule)
 
-    # 2) Paket hedefe tam 1 varış
     def package_destination_rule(m, p):
         d = m.PackageDest[p]
         return sum(m.y[p, v, i, d, t] for v in m.Vehicles for i in m.Cities for t in m.Periods if i != d) == 1
-
     model.package_destination_constraint = Constraint(model.Packages, rule=package_destination_rule)
 
-    # 3) Ana depodan en az bir kez geçiş (origin/dest depo değilse)
     def main_depot_rule(m, p):
         o, d = m.PackageOrigin[p], m.PackageDest[p]
-        if o == main_depot or d == main_depot:
+        if o == meta_main_depot or d == meta_main_depot:
             return Constraint.Skip
-        through = sum(m.y[p, v, i, main_depot, t] for v in m.Vehicles for i in m.Cities for t in m.Periods if i != main_depot) \
-                + sum(m.y[p, v, main_depot, j, t] for v in m.Vehicles for j in m.Cities for t in m.Periods if j != main_depot)
+        through = sum(m.y[p, v, i, meta_main_depot, t] for v in m.Vehicles for i in m.Cities for t in m.Periods if i != meta_main_depot) \
+                + sum(m.y[p, v, meta_main_depot, j, t] for v in m.Vehicles for j in m.Cities for t in m.Periods if j != meta_main_depot)
         return through >= 1
 
-    model.main_depot_constraint = Constraint(model.Packages, rule=main_depot_rule)
+    # 3 no'lu kısıt için ana depo adını dışarıdan geçirmek adına küçük bir hack:
+    # Pyomo lambda'larında kapatma kullanılan değişkenleri sevmez; global bir isim kullanacağız.
+    global meta_main_depot
 
+    meta_main_depot = None  # build_model çağrısında set edilecek
     # 4) Paket ancak araç gidiyorsa taşınır
     def y_le_x_rule(m, p, v, i, j, t):
         if i == j:
             return Constraint.Skip
         return m.y[p, v, i, j, t] <= m.x[v, i, j, t]
-
     model.package_vehicle_link = Constraint(model.Packages, model.Vehicles, model.Cities, model.Cities, model.Periods, rule=y_le_x_rule)
 
-    # 5) Kapasite
     def capacity_rule(m, v, i, j, t):
         if i == j:
             return Constraint.Skip
         return sum(m.PackageWeight[p] * m.y[p, v, i, j, t] for p in m.Packages) <= m.VehicleCapacity[v]
-
     model.capacity_constraint = Constraint(model.Vehicles, model.Cities, model.Cities, model.Periods, rule=capacity_rule)
 
-    # 6) SOFT min. doluluk (sadece ana depodan çıkış)
     def min_utilization_soft_rule(m, v, t):
-        departures = sum(m.x[v, main_depot, j, t] for j in m.Cities if j != main_depot)  # 0/1
-        loaded = sum(m.PackageWeight[p] * m.y[p, v, main_depot, j, t] for p in m.Packages for j in m.Cities if j != main_depot)
+        departures = sum(m.x[v, meta_main_depot, j, t] for j in m.Cities if j != meta_main_depot)
+        loaded = sum(m.PackageWeight[p] * m.y[p, v, meta_main_depot, j, t] for p in m.Packages for j in m.Cities if j != meta_main_depot)
         target = m.MinUtilization[v] * m.VehicleCapacity[v] * departures
         return loaded + m.minutil_shortfall[v, t] >= target
-
     model.min_utilization_soft = Constraint(model.Vehicles, model.Periods, rule=min_utilization_soft_rule)
 
-    # 7) Paket konumu: her t’de tek şehir
     def pkg_onehot_rule(m, p, t):
         return sum(m.pkg_loc[p, n, t] for n in m.Cities) == 1
-
     model.pkg_location_onehot = Constraint(model.Packages, model.Periods, rule=pkg_onehot_rule)
 
-    # 8) Ready öncesi origin kilidi ve t=ready’de origin
     def pkg_before_ready_origin_rule(m, p, t):
         o, r = m.PackageOrigin[p], m.PackageReady[p]
         if t < r:
             return m.pkg_loc[p, o, t] == 1
         return Constraint.Skip
-
     model.pkg_before_ready_origin = Constraint(model.Packages, model.Periods, rule=pkg_before_ready_origin_rule)
 
     def pkg_before_ready_others_zero_rule(m, p, n, t):
@@ -232,13 +207,11 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
         if t < r and n != o:
             return m.pkg_loc[p, n, t] == 0
         return Constraint.Skip
-
     model.pkg_before_ready_others_zero = Constraint(model.Packages, model.Cities, model.Periods, rule=pkg_before_ready_others_zero_rule)
 
     def pkg_at_ready_origin_rule(m, p):
         o, r = m.PackageOrigin[p], m.PackageReady[p]
         return m.pkg_loc[p, o, r] == 1
-
     model.pkg_at_ready_origin = Constraint(model.Packages, rule=pkg_at_ready_origin_rule)
 
     def pkg_at_ready_others_zero_rule(m, p, n):
@@ -246,34 +219,26 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
         if n != o:
             return m.pkg_loc[p, n, r] == 0
         return Constraint.Skip
-
     model.pkg_at_ready_others_zero = Constraint(model.Packages, model.Cities, rule=pkg_at_ready_others_zero_rule)
 
-    # 9) Paket konum geçişi
     def pkg_loc_transition_rule(m, p, n, t):
         if t == Tmax:
             return Constraint.Skip
         incoming = sum(m.y[p, v, i, n, t] for v in m.Vehicles for i in m.Cities if i != n)
         outgoing = sum(m.y[p, v, n, j, t] for v in m.Vehicles for j in m.Cities if j != n)
         return m.pkg_loc[p, n, t] + incoming - outgoing == m.pkg_loc[p, n, t + 1]
-
     model.pkg_location_transition = Constraint(model.Packages, model.Cities, model.Periods, rule=pkg_loc_transition_rule)
 
-    # 10) Çıkış mümkünse o anda orada ol
     def pkg_departure_feasible_rule(m, p, i, t):
         return sum(m.y[p, v, i, j, t] for v in m.Vehicles for j in m.Cities if j != i) <= m.pkg_loc[p, i, t]
-
     model.pkg_departure_feasible = Constraint(model.Packages, model.Cities, model.Periods, rule=pkg_departure_feasible_rule)
 
-    # 11) Varıştan sonra t+1’de hedef şehirde ol
     def pkg_arrival_feasible_rule(m, p, j, t):
         if t == Tmax:
             return Constraint.Skip
         return sum(m.y[p, v, i, j, t] for v in m.Vehicles for i in m.Cities if i != j) <= m.pkg_loc[p, j, t + 1]
-
     model.pkg_arrival_feasible = Constraint(model.Packages, model.Cities, model.Periods, rule=pkg_arrival_feasible_rule)
 
-    # 12) Ara şehir akış korunumu
     def flow_conservation_rule(m, p, k):
         o, d = m.PackageOrigin[p], m.PackageDest[p]
         if k == o or k == d:
@@ -281,77 +246,59 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
         inflow = sum(m.y[p, v, i, k, t] for v in m.Vehicles for i in m.Cities for t in m.Periods if i != k)
         outflow = sum(m.y[p, v, k, j, t] for v in m.Vehicles for j in m.Cities for t in m.Periods if j != k)
         return inflow == outflow
-
     model.flow_conservation = Constraint(model.Packages, model.Cities, rule=flow_conservation_rule)
 
-    # 13) Araç kullanım takibi
     def vehicle_usage_rule(m, v, t):
         moves = sum(m.x[v, i, j, t] for i in m.Cities for j in m.Cities if i != j)
         return m.z[v, t] >= moves
-
     model.vehicle_usage = Constraint(model.Vehicles, model.Periods, rule=vehicle_usage_rule)
 
-    # 14) Araç: periyot başına tek hareket
     def vehicle_one_move_rule(m, v, t):
         return sum(m.x[v, i, j, t] for i in m.Cities for j in m.Cities if i != j) <= 1
-
     model.vehicle_route_out = Constraint(model.Vehicles, model.Periods, rule=vehicle_one_move_rule)
 
-    # 15) Araç başlangıç konumu (t=1’de ana depoda)
     def vehicle_initial_loc_rule(m, v):
-        return m.loc[v, main_depot, Tmin] == 1
-
+        return m.loc[v, meta_main_depot, Tmin] == 1
     model.vehicle_initial_location = Constraint(model.Vehicles, rule=vehicle_initial_loc_rule)
 
-    # 16) Araç: her t’de tek şehir
     def vehicle_loc_onehot_rule(m, v, t):
         return sum(m.loc[v, n, t] for n in m.Cities) == 1
-
     model.vehicle_location_exists = Constraint(model.Vehicles, model.Periods, rule=vehicle_loc_onehot_rule)
 
-    # 17) Araç konum geçişi
     def vehicle_loc_transition_rule(m, v, n, t):
         if t == Tmax:
             return Constraint.Skip
         incoming = sum(m.x[v, i, n, t] for i in m.Cities if i != n)
         outgoing = sum(m.x[v, n, j, t] for j in m.Cities if j != n)
         return m.loc[v, n, t] + incoming - outgoing == m.loc[v, n, t + 1]
-
     model.vehicle_location_transition = Constraint(model.Vehicles, model.Cities, model.Periods, rule=vehicle_loc_transition_rule)
 
-    # 18) Araç sadece bulunduğu şehirden ayrılabilir
     def vehicle_move_from_loc_rule(m, v, i, t):
         outgoing = sum(m.x[v, i, j, t] for j in m.Cities if j != i)
         return outgoing <= m.loc[v, i, t]
+    model.movement_from_location = Constraint(model.Vehicles, model.Cities, model.Periods, rule=vehicle_move_from_location)
 
-    model.movement_from_location = Constraint(model.Vehicles, model.Cities, model.Periods, rule=vehicle_move_from_loc_rule)
-
-    # 19) Gecikme tanımı
     def lateness_rule(m, p):
         d = m.PackageDest[p]
         delivery_t = sum(t * m.y[p, v, i, d, t] for v in m.Vehicles for i in m.Cities for t in m.Periods if i != d)
         deadline = m.PackageReady[p] + m.PackageDeadline[p]
         return m.lateness[p] >= delivery_t - deadline
-
     model.lateness_calc = Constraint(model.Packages, rule=lateness_rule)
 
-    # 20) Aynı paket aynı i→j segmentini toplamda ≤1
     def package_once_segment_rule(m, p, i, j):
         if i == j:
             return Constraint.Skip
         return sum(m.y[p, v, i, j, t] for v in m.Vehicles for t in m.Periods) <= 1
-
     model.package_once_per_segment = Constraint(model.Packages, model.Cities, model.Cities, rule=package_once_segment_rule)
 
-    # 21) Hazır olmadan origin'den çıkamaz
     def package_ready_time_rule(m, p, v, i, j, t):
         if i == j or i != m.PackageOrigin[p]:
             return Constraint.Skip
         return m.y[p, v, i, j, t] * t >= m.y[p, v, i, j, t] * m.PackageReady[p]
-
     model.package_ready_time = Constraint(model.Packages, model.Vehicles, model.Cities, model.Cities, model.Periods, rule=package_ready_time_rule)
 
-    return model, {
+    # meta
+    meta = {
         "cities": cities,
         "periods_list": periods_list,
         "vehicles": vehicles,
@@ -361,6 +308,11 @@ def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]
         "main_depot": main_depot,
         "MINUTIL_PENALTY": MINUTIL_PENALTY
     }
+
+    # global ana depo ismi (kısıt fonksiyonları için)
+    globals()["meta_main_depot"] = main_depot
+
+    return model, meta
 
 
 def extract_results(model: ConcreteModel, meta: Dict[str, Any]) -> Dict[str, Any]:
@@ -375,7 +327,7 @@ def extract_results(model: ConcreteModel, meta: Dict[str, Any]) -> Dict[str, Any
     total_obj = float(value(model.obj))
     results["objective"] = total_obj
 
-    # Maliyet dağılımı
+    # Maliyetler
     transport_cost = 0.0
     for v in vehicles:
         for i in cities:
@@ -479,11 +431,38 @@ def extract_results(model: ConcreteModel, meta: Dict[str, Any]) -> Dict[str, Any
 
 
 # ---------- Routes ----------
-
 @app.route("/")
 def root():
     return send_from_directory(".", "index.html")
 
+@app.route("/health")
+def health():
+    return jsonify({"ok": True})
+
+@app.route("/debug/solvers")
+def debug_solvers():
+    out = {}
+    # APPsi doğrudan denenir
+    try:
+        from pyomo.contrib.appsi.solvers.highs import Highs as AppsiHighs
+        _ = AppsiHighs()
+        out["appsi_highs_direct"] = True
+    except Exception as e:
+        out["appsi_highs_direct"] = False
+        out["appsi_err"] = str(e)
+    # SolverFactory üzerinden bak
+    try:
+        from pyomo.environ import SolverFactory
+        names = ["appsi_highs", "highs", "cbc", "glpk", "cplex"]
+        for n in names:
+            try:
+                s = SolverFactory(n)
+                out[n] = bool(s and s.available())
+            except Exception:
+                out[n] = False
+    except Exception as e:
+        out["sf_error"] = str(e)
+    return jsonify(out)
 
 @app.route("/solve", methods=["POST"])
 def solve():
@@ -491,31 +470,25 @@ def solve():
         data = request.get_json(force=True)
         model, meta = build_model(data)
 
-        solver_name, solver = pick_solver()
+        solver_name, solver, is_appsi = pick_solver()
         if solver is None:
-            return jsonify({
-                "ok": False,
-                "error": "Uygun MILP çözücüsü bulunamadı. Lütfen GLPK/HiGHS/CBC/CPLEX'ten en az birini kurun."
-            }), 400
+            return jsonify({"ok": False, "error": "Uygun MILP çözücüsü bulunamadı. Lütfen GLPK/HiGHS/CBC/CPLEX'ten en az birini kurun."}), 400
 
         # ÇÖZ
-        # ÇÖZ  (APPsi-HiGHS 'tee' parametresini kabul etmez)
-if solver_name == "appsi_highs":
-    results = solver.solve(model)
-else:
-    # Klasik arayüzler için 'tee' deneyip, desteklenmiyorsa onsuz çöz
-    try:
-        results = solver.solve(model, tee=False)
-    except TypeError:
-        results = solver.solve(model)
-
-
-        # TerminationCondition hem APPsi hem klasik arayüz için güvenli şekilde alınır
-        from pyomo.opt import TerminationCondition
-        if hasattr(results, "solver") and hasattr(results.solver, "termination_condition"):
-            term = results.solver.termination_condition
-        else:
+        if is_appsi:
+            results = solver.solve(model)  # APPsi: tee argümanı yok
             term = getattr(results, "termination_condition", None)
+        else:
+            # Klasik arayüz: tee destekliyse kullan, değilse onsuz dene
+            try:
+                results = solver.solve(model, tee=False)
+            except TypeError:
+                results = solver.solve(model)
+            # Termination condition'ı güvenli al
+            if hasattr(results, "solver") and hasattr(results.solver, "termination_condition"):
+                term = results.solver.termination_condition
+            else:
+                term = getattr(results, "termination_condition", None)
 
         if term not in [TerminationCondition.feasible, TerminationCondition.optimal]:
             return jsonify({"ok": False, "error": f"Çözüm bulunamadı. Durum: {term}"}), 200
@@ -524,14 +497,8 @@ else:
         return jsonify({"ok": True, "solver": solver_name, "result": out})
 
     except Exception as e:
-        import traceback
         return jsonify({"ok": False, "error": f"Hata: {str(e)}", "trace": traceback.format_exc()}), 500
 
 
 if __name__ == "__main__":
-    # python backend.py
     app.run(host="0.0.0.0", port=5000, debug=True)
-
-
-
-
