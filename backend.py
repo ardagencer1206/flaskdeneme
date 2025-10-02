@@ -21,33 +21,43 @@ def safe_float(x, default=0.0):
 
 def pick_solver():
     """
-    Railway gibi apt erişimi olmayan ortamlarda en güvenilir kurulum:
-    - Pyomo APPsi + highspy (HiGHS)
-    Bu nedenle önce 'appsi_highs' denenir. Ardından diğerleri.
+    Önce Pyomo APPsi'nin HiGHS wrapper'ını doğrudan dener (highspy ile çalışır).
+    Başarısız olursa klasik SolverFactory sırasına düşer.
+    Geriye (solver_adı, solver_nesnesi) döner.
     """
-    order = ["appsi_highs", "highs", "cplex", "cbc", "glpk"]
-    for cand in order:
+    # 1) APPsi-HiGHS (doğrudan Python API)
+    try:
+        from pyomo.contrib.appsi.solvers.highs import Highs as AppsiHighs
+        s = AppsiHighs()
+        try:
+            s.config.time_limit = 300  # makul süre sınırı
+        except Exception:
+            pass
+        return "appsi_highs", s
+    except Exception:
+        pass
+
+    # 2) SolverFactory ile dene (Railway'de bazen 'highs' da çalışır)
+    from pyomo.environ import SolverFactory
+    for cand in ["appsi_highs", "highs", "cplex", "cbc", "glpk"]:
         try:
             s = SolverFactory(cand)
             if s is not None and s.available():
-                # makul zaman sınırları
-                if cand in ("appsi_highs", "highs"):
-                    # APPsi tarafında seçenek isimleri farklı olabilir, o yüzden try/except
-                    for key in ("time_limit", "timelimit"):
-                        try: s.options[key] = 300
-                        except Exception: pass
-                elif cand == "cplex":
+                # zaman sınırı ayarla (opsiyonel)
+                for key in ("time_limit", "timelimit"):
+                    try:
+                        s.options[key] = 300
+                    except Exception:
+                        pass
+                if cand == "cplex":
                     s.options["mipgap"] = 0.05
-                    s.options["timelimit"] = 300
                     s.options["threads"] = 2
-                elif cand in ("cbc", "glpk"):
-                    for key in ("time_limit", "timelimit"):
-                        try: s.options[key] = 300
-                        except Exception: pass
                 return cand, s
         except Exception:
             continue
+
     return None, None
+
 
 
 def build_model(payload: Dict[str, Any]) -> Tuple[ConcreteModel, Dict[str, Any]]:
@@ -511,4 +521,5 @@ def solve():
 if __name__ == "__main__":
     # python backend.py
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
