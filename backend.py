@@ -484,6 +484,7 @@ def extract_results(model: ConcreteModel, meta: Dict[str, Any]) -> Dict[str, Any
 def root():
     return send_from_directory(".", "index.html")
 
+
 @app.route("/solve", methods=["POST"])
 def solve():
     try:
@@ -497,29 +498,30 @@ def solve():
                 "error": "Uygun MILP çözücüsü bulunamadı. Lütfen GLPK/HiGHS/CBC/CPLEX'ten en az birini kurun."
             }), 400
 
-        # Çöz
-        results = solver.solve(model, tee=False)
-        term = results.solver.termination_condition
+        # ÇÖZ
+        results = solver.solve(model, tee=False) if hasattr(solver, "solve") else solver.solve(model)
+
+        # TerminationCondition hem APPsi hem klasik arayüz için güvenli şekilde alınır
+        from pyomo.opt import TerminationCondition
+        if hasattr(results, "solver") and hasattr(results.solver, "termination_condition"):
+            term = results.solver.termination_condition
+        else:
+            term = getattr(results, "termination_condition", None)
 
         if term not in [TerminationCondition.feasible, TerminationCondition.optimal]:
-            return jsonify({
-                "ok": False,
-                "error": f"Çözüm bulunamadı. Durum: {term}"
-            }), 200
+            return jsonify({"ok": False, "error": f"Çözüm bulunamadı. Durum: {term}"}), 200
 
         out = extract_results(model, meta)
         return jsonify({"ok": True, "solver": solver_name, "result": out})
 
     except Exception as e:
-        return jsonify({
-            "ok": False,
-            "error": f"Hata: {str(e)}",
-            "trace": traceback.format_exc()
-        }), 500
+        import traceback
+        return jsonify({"ok": False, "error": f"Hata: {str(e)}", "trace": traceback.format_exc()}), 500
 
 
 if __name__ == "__main__":
     # python backend.py
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
