@@ -508,8 +508,8 @@ def solve():
         if term in [TerminationCondition.feasible, TerminationCondition.optimal]:
     out = extract_results(model, meta)
     return jsonify({"ok": True, "solver": solver_name, "result": out})
-else:
-    return jsonify({"ok": False, "error": f"Çözüm bulunamadı. Durum: {term}"}), 200
+        else:
+        return jsonify({"ok": False, "error": f"Çözüm bulunamadı. Durum: {term}"}), 200
 
 
         out = extract_results(model, meta)
@@ -522,4 +522,5 @@ else:
 if __name__ == "__main__":
     # Lokal test için:
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
