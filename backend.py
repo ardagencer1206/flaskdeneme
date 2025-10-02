@@ -488,13 +488,13 @@ def solve():
         if solver is None:
             return jsonify({"ok": False, "error": "Uygun MILP çözücüsü bulunamadı."}), 400
 
-        # Çöz
+        # ÇÖZ
         if is_appsi:
-            # APPsi-HiGHS 'tee' parametresini almaz
+            # APPsi-HiGHS 'tee' argümanını kabul etmez
             results = solver.solve(model)
             term = getattr(results, "termination_condition", None)
         else:
-            # Klasik arayüz: 'tee' destekliyse ver, değilse onsuz çöz
+            # Klasik arayüz: 'tee' destekliyse kullan, değilse onsuz çöz
             try:
                 results = solver.solve(model, tee=False)
             except TypeError:
@@ -506,14 +506,12 @@ def solve():
             else:
                 term = getattr(results, "termination_condition", None)
 
-        # ---- BURADAN SONRASI DOĞRU BLOK ----
-# Çözüm sonrası kontrol
-            if term in (TerminationCondition.feasible, TerminationCondition.optimal):
-                out = extract_results(model, meta)
-                return jsonify({"ok": True, "solver": solver_name, "result": out})
-            else:
-                return jsonify({"ok": False, "error": f"Çözüm bulunamadı. Durum: {term}"}), 200
-
+        # Başarı kontrolü — OPTIMAL ve FEASIBLE durumları BAŞARILI kabul edilir
+        if term in (TerminationCondition.feasible, TerminationCondition.optimal):
+            out = extract_results(model, meta)
+            return jsonify({"ok": True, "solver": solver_name, "result": out})
+        else:
+            return jsonify({"ok": False, "error": f"Çözüm bulunamadı. Durum: {term}"}), 200
 
     except Exception as e:
         return jsonify({"ok": False, "error": f"Hata: {str(e)}", "trace": traceback.format_exc()}), 500
@@ -522,6 +520,7 @@ def solve():
 if __name__ == "__main__":
     # Lokal test için:
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
 
