@@ -477,6 +477,9 @@ def root():
 def health():
     return jsonify({"ok": True})
 
+@app.errorhandler(500)
+def handle_500(e):
+    return jsonify({"ok": False, "error": "Internal Server Error"}), 500
 
 @app.route("/solve", methods=["POST"])
 def solve():
@@ -520,6 +523,7 @@ def solve():
 if __name__ == "__main__":
     # Lokal test için:
     app.run(host="0.0.0.0", port=5000, debug=True)
+
 
 
 
